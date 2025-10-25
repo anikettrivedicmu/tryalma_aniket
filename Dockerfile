@@ -6,6 +6,8 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     gcc \
     postgresql-client \
+    libmagic1 \
+    file \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
@@ -18,10 +20,9 @@ COPY . .
 # Create upload directory
 RUN mkdir -p uploads && chmod 755 uploads
 
-# Run as non-root user
+# Create non-root user but don't switch yet
 RUN useradd -m myuser
 RUN chown -R myuser:myuser /app
-USER myuser
 
 # Command to run the application
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

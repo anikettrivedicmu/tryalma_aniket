@@ -11,10 +11,10 @@ from app.db.session import get_db
 from app.models.user import User
 from app.schemas.user import Token, User as UserSchema
 
-router = APIRouter()
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+router = APIRouter(tags=["auth"])
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/token")
 
-@router.post("/login", response_model=Token)
+@router.post("/token", response_model=Token)
 async def login(
     db: Session = Depends(get_db),
     form_data: OAuth2PasswordRequestForm = Depends()

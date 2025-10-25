@@ -1,9 +1,10 @@
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, BackgroundTasks
 from sqlalchemy.orm import Session
 from fastapi_limiter.depends import RateLimiter
 
 from app.core.config import settings
+from app.core.logging import get_logger
 from app.db.session import get_db
 from app.models.lead import Lead, LeadStatus
 from app.models.user import User
@@ -13,11 +14,13 @@ from app.services.email import send_lead_notification
 from app.services.file import save_resume
 
 router = APIRouter()
+logger = get_logger()
 
 @router.post("/", response_model=LeadInDB)
 async def create_lead(
     *,
     db: Session = Depends(get_db),
+    background_tasks: BackgroundTasks,
     first_name: str = Form(...),
     last_name: str = Form(...),
     email: str = Form(...),
@@ -38,14 +41,23 @@ async def create_lead(
         resume_path=resume_path,
         status=LeadStatus.PENDING
     )
-    db.add(lead)
-    db.commit()
-    db.refresh(lead)
-    
-    # Send notifications
-    await send_lead_notification(lead)
-    
-    return lead
+    try:
+        db.add(lead)
+        db.commit()
+        db.refresh(lead)
+        logger.info(f"Created new lead: {lead.email}")
+        
+        # Send notifications in background
+        await send_lead_notification(lead)
+        logger.info(f"Queued notification for lead: {lead.email}")
+        return lead
+    except Exception as e:
+        logger.error(f"Error creating lead: {str(e)}")
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error creating lead"
+        )
 
 @router.get("/", response_model=List[LeadInDB])
 async def get_leads(
@@ -58,10 +70,19 @@ async def get_leads(
     """
     Retrieve leads. Can be filtered by status.
     """
-    query = db.query(Lead)
-    if status:
-        query = query.filter(Lead.status == status)
-    return query.offset(skip).limit(limit).all()
+    try:
+        query = db.query(Lead)
+        if status:
+            query = query.filter(Lead.status == status)
+        leads = query.offset(skip).limit(limit).all()
+        logger.info(f"Retrieved {len(leads)} leads with status: {status if status else 'all'}")
+        return leads
+    except Exception as e:
+        logger.error(f"Error retrieving leads: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error retrieving leads"
+        )
 
 @router.get("/{lead_id}", response_model=LeadInDB)
 async def get_lead(
@@ -72,10 +93,21 @@ async def get_lead(
     """
     Get a specific lead by ID.
     """
-    lead = db.query(Lead).filter(Lead.id == lead_id).first()
-    if not lead:
-        raise HTTPException(status_code=404, detail="Lead not found")
-    return lead
+    try:
+        lead = db.query(Lead).filter(Lead.id == lead_id).first()
+        if not lead:
+            logger.warning(f"Lead not found with ID: {lead_id}")
+            raise HTTPException(status_code=404, detail="Lead not found")
+        logger.info(f"Retrieved lead: {lead.id} ({lead.email})")
+        return lead
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving lead {lead_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error retrieving lead"
+        )
 
 @router.patch("/{lead_id}/status", response_model=LeadInDB)
 async def update_lead_status(
@@ -87,13 +119,26 @@ async def update_lead_status(
     """
     Update a lead's status.
     """
-    lead = db.query(Lead).filter(Lead.id == lead_id).first()
-    if not lead:
-        raise HTTPException(status_code=404, detail="Lead not found")
-    
-    lead.status = lead_update.status
-    db.add(lead)
-    db.commit()
-    db.refresh(lead)
-    
-    return lead
+    try:
+        lead = db.query(Lead).filter(Lead.id == lead_id).first()
+        if not lead:
+            logger.warning(f"Lead not found with ID: {lead_id}")
+            raise HTTPException(status_code=404, detail="Lead not found")
+        
+        old_status = lead.status
+        lead.status = lead_update.status
+        db.add(lead)
+        db.commit()
+        db.refresh(lead)
+        
+        logger.info(f"Updated lead {lead.id} status from {old_status} to {lead.status}")
+        return lead
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating lead {lead_id} status: {str(e)}")
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error updating lead status"
+        )
